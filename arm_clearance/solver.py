@@ -3,6 +3,8 @@ import json
 import math
 import time
 import numpy as np
+from .temporal import temporal_matrix
+from .stationary import StationaryControls, transition_basis
 import bmesh
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
@@ -232,6 +234,7 @@ class ClipSolver:
         the remaining controls retain the initial full-clip spline projection.
         The objective and temporal terms still cover the complete frame range.
         """
+        self.progress('solve_prepare', 0, iterations)
         m = self.model
         parameters=getattr(m,'parameter_count',4)
         dimension=parameters*3
@@ -242,8 +245,16 @@ class ClipSolver:
         weights=np.stack(((1-u)**3,3*u**3-6*u*u+4,-3*u**3+3*u*u+3*u+1,u**3),axis=1)/6
         basis=np.zeros((m.n,int(k.max())+4))
         basis[np.arange(m.n)[:,None],k[:,None]+np.arange(4)]=weights
+        spans=getattr(self,'stationary_spans',())
+        extra_knots=()
+        if spans:
+            refined,extra_knots=transition_basis(m.n,spacing,spans)
+            if refined is not None:basis=refined
         controls=basis.shape[1]
         x=np.zeros((controls,dimension)).ravel() if initial is None else np.linalg.lstsq(basis,initial.reshape(m.n,dimension),rcond=None)[0].ravel()
+        spans=getattr(self,'stationary_spans',())
+        stationary=StationaryControls(basis,parameters,spans) if spans else None
+        if stationary is not None:stationary.project(x)
         free_variables=None
         free_controls=np.ones(controls,dtype=bool)
         if free_frames is not None:
@@ -252,6 +263,9 @@ class ClipSolver:
                 raise ValueError('free_frames must be a boolean mask of shape [frames]')
             free_controls=np.any(basis[free_frames]>0.,axis=0)
             free_variables=np.repeat(free_controls,dimension)
+            if stationary is not None:
+                stationary.expand_free(free_variables)
+                free_controls=np.any(free_variables.reshape(controls,dimension),axis=1)
         def frames(var):return (basis@var.reshape(controls,dimension)).reshape(m.n,parameters,3)
         self.editable_frame_mask=np.any(basis[:,free_controls]>0.,axis=1)
         editable_indices=np.flatnonzero(self.editable_frame_mask)
@@ -267,8 +281,10 @@ class ClipSolver:
         def objective(var):
             value,gradient=self.objective(frames(var).ravel())
             projected=(basis.T@gradient.reshape(m.n,dimension)).ravel()
+            if stationary is not None:stationary.project(projected)
             if free_variables is not None:projected[~free_variables]=0.
             return value,projected
+        self.progress('solve_initial', 0, iterations)
         value, grad = objective(x)
         history = []
         # Use the temporal quadratic as the initial inverse Hessian. This
@@ -276,25 +292,46 @@ class ClipSolver:
         # frame, and avoids extremely slow convergence with stiff smoothing.
         # Staged/warm solves reuse exactly the same original decomposition.
         # Keep only one entry and rebuild whenever any defining input changes.
+        self.progress('solve_temporal', 0, iterations)
         temporal_key=(m.n,spacing,float(self.velocity),float(self.acceleration))
+        if extra_knots:temporal_key+=(extra_knots,)
         temporal_cache=getattr(self,'_temporal_eigen_cache',None)
         if temporal_cache is None or temporal_cache[0]!=temporal_key:
-            d1=np.diff(np.eye(m.n),axis=0)
-            d2=np.diff(np.eye(m.n),n=2,axis=0)
-            temporal=basis.T@(2*self.velocity*(d1.T@d1)+2*self.acceleration*(d2.T@d2))@basis
+            # Project the five nonzero frame diagonals in the original
+            # summation order; avoid dense frame-by-frame D.T@D products.
+            temporal=temporal_matrix(basis,self.velocity,self.acceleration)
             eigenvalues,eigenvectors=np.linalg.eigh(temporal)
             self._temporal_eigen_cache=(temporal_key,eigenvalues,eigenvectors)
         else:
             _,eigenvalues,eigenvectors=temporal_cache
+        reduction=stationary.shared_reduction() if stationary is not None else None
+        if reduction is not None:
+            reduced_key=(temporal_key,tuple(spans))
+            cached=getattr(self,'_stationary_eigen_cache',None)
+            if cached is None or cached[0]!=reduced_key:
+                reduced_basis=basis@reduction
+                reduced_temporal=temporal_matrix(reduced_basis,self.velocity,self.acceleration)
+                held_values,held_vectors=np.linalg.eigh(reduced_temporal)
+                self._stationary_eigen_cache=(reduced_key,held_values,held_vectors)
+            else:
+                _,held_values,held_vectors=cached
+        accepted_steps = 0
         for iteration in range(iterations):
+            self.progress('solve_iteration', iteration, iterations)
             q = grad.copy(); alpha = []
             for s,y,rho in reversed(history):
                 a = rho*np.dot(s,q);alpha.append(a);q-=a*y
             scale = np.dot(history[-1][0],history[-1][1])/max(np.dot(history[-1][1],history[-1][1]),1e-20) if history else 1e-3
-            direction=(eigenvectors@((eigenvectors.T@q.reshape(controls,dimension))/(1./max(scale,1e-12)+eigenvalues[:,None]))).ravel()
+            if reduction is None:
+                direction=(eigenvectors@((eigenvectors.T@q.reshape(controls,dimension))/(1./max(scale,1e-12)+eigenvalues[:,None]))).ravel()
+            else:
+                reduced_gradient=reduction.T@q.reshape(controls,dimension)
+                direction=(reduction@(held_vectors@((held_vectors.T@reduced_gradient)/
+                    (1./max(scale,1e-12)+held_values[:,None])))).ravel()
             for (s,y,rho),a in zip(history,reversed(alpha)):
                 direction+=s*(a-rho*np.dot(y,direction))
             direction=-direction
+            if stationary is not None:stationary.project(direction)
             if free_variables is not None:direction[~free_variables]=0.
             slope=np.dot(grad,direction)
             if slope>=0:
@@ -303,7 +340,9 @@ class ClipSolver:
             accepted=False
             for trial in range(16):
                 candidate=x+step*direction
+                if stationary is not None:stationary.project(candidate)
                 if free_variables is not None:candidate[~free_variables]=x[~free_variables]
+                self.progress('solve_trial', iteration, iterations, trial+1)
                 nv,ng=objective(candidate)
                 if np.isfinite(nv) and nv<=value+1e-4*step*slope:
                     accepted=True;break
@@ -313,12 +352,19 @@ class ClipSolver:
             if sy>1e-10:
                 history.append((s,y,1./sy));history=history[-16:]
             x,value,grad=candidate,nv,ng
+            accepted_steps = iteration + 1
             if iteration%5==0:
                 self.progress('solve',iteration,iterations,self.last_metrics)
                 self.history.append(dict(iteration=iteration,**self.last_metrics))
                 yield frames(x).copy()
             if np.max(np.abs(grad))<1e-5: break
+        self.progress('solve_done', accepted_steps, iterations)
         self.result=frames(x)
+        if stationary is not None:
+            self.last_optimization_scope['stationary_control_groups']=len(stationary.groups)
+            self.last_optimization_scope['stationary_max_correction_excursion']=max(
+                float(np.max(np.abs(self.result[a:b+1,p]-self.result[a,p])))
+                for p,a,b in spans)
         if locked_reference is not None and len(locked_reference):
             self.last_optimization_scope['locked_control_drift_max_abs']=float(np.max(np.abs(x[~free_variables]-locked_reference)))
         yield self.result

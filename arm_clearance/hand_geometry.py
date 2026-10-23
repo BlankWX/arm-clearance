@@ -408,6 +408,8 @@ def build_hand_geometry(geometry, meta, matrices, palm_spheres=12,
         if number < count:
             points[:, side, number:] = matrices[:, wrists[side], None, :3, 3]
         if ellipsoids:
+            if progress:
+                progress('hand_fit', side+1, 2)
             # Fitting only rest-pose aspect ratios can amplify a small
             # articulated tangential deviation into unnecessary palm depth.
             # Fit one fixed basis/aspect to a coarse temporal coreset, then

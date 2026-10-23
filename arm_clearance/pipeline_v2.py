@@ -17,6 +17,8 @@ from .solver_v2 import FullLimbModel, FullLimbSolver, full_metrics
 from .hand_geometry import build_hand_geometry, refit_corrected_hand_envelopes
 from .full_surface import surface_check
 from .surface_repair import build_surface_repair_weights, merge_surface_repair_fields
+from .progress import ConsoleProgress
+from .stationary import stationary_spans
 
 
 _LINKS = ('ac_source_action', 'ac_result_action', 'ac_previous_result_action', 'ac_review_action')
@@ -167,7 +169,30 @@ def _repair_free_frames(surface, frames, half_window=24.):
     return free, evidence
 
 
-def run_job(scene, settings, status):
+def run_job(scene, settings, status, *, console=None):
+    """Log lifecycle outcomes after the original generator restores scene state."""
+    log = console if console is not None else ConsoleProgress()
+    start, end = int(scene.frame_start), int(scene.frame_end)
+    log.start('场景范围 %d–%d，共 %d 帧' % (start, end, max(0, end-start+1)))
+    def report(message):
+        status(message)
+        log.update(message)
+    try:
+        result = yield from _run_job(scene, settings, report)
+    except (GeneratorExit, KeyboardInterrupt):
+        log.finish('cancelled', '用户取消，本次运行已结束')
+        raise
+    except BaseException as error:
+        log.finish('error', str(error))
+        raise
+    else:
+        validation = result.get('arm_clearance_validation_status') if result is not None else None
+        outcome = {'passed': 'complete', 'needs_review': 'needs_review'}.get(validation, 'error')
+        log.finish(outcome, settings.status if result is not None else '本次未生成完整烘焙')
+        return result
+
+
+def _run_job(scene, settings, status):
     """Generate a complete six-bone result using the scene's current range.
 
     ``status`` accepts a human-readable progress string; yield points match
@@ -232,6 +257,7 @@ def run_job(scene, settings, status):
         quaternions = np.empty((len(frames), 6, 4), dtype=np.float32)
         locations = np.empty((len(frames), 2, 3), dtype=np.float32)
         location_bases = np.empty((len(frames), 2, 3, 3), dtype=np.float32)
+        status('采样原动作六骨与双腕位置 0/%d' % len(frames))
         for index, frame in enumerate(frames):
             scene.frame_set(int(frame))
             matrices[index] = [arm.pose.bones[name].matrix for name in meta['bones']]
@@ -250,18 +276,36 @@ def run_job(scene, settings, status):
         yield None
         optimization_phase = '主优化'
         def progress(stage, current=0, total=0, *info):
-            if stage == 'solve':
-                status('%s 第%d/%d组 %d/%d步' % (
-                    optimization_phase, solver.optimization_stage_index,
-                    solver.optimization_stage_count, int(current) + 1, int(total)))
+            if stage.startswith('solve'):
+                group = '%s 第%d/%d组' % (optimization_phase,
+                    solver.optimization_stage_index, solver.optimization_stage_count)
+                if stage in ('solve', 'solve_iteration', 'solve_trial'):
+                    suffix = ('线搜索 %d/16' % int(info[0]) if stage == 'solve_trial'
+                              else {'solve': '已接受', 'solve_iteration': '计算修正方向'}[stage])
+                    status('%s %d/%d步 %s' % (group, int(current)+1, int(total), suffix))
+                elif stage == 'solve_done':
+                    status('%s 本组结束：已接受 %d/%d步（允许提前结束）' % (group, int(current), int(total)))
+                else:
+                    label = {'solve_stage': '更新碰撞约束', 'solve_prepare': '准备整段样条',
+                             'solve_initial': '计算初始碰撞与梯度',
+                             'solve_temporal': '预计算时间平滑矩阵'}[stage]
+                    status(group + '：' + label)
                 return
-            label = {'hands': '采样完整手掌手指', 'colliders': '建立身体连续碰撞缓存',
+            label = {'hands': '采样完整手掌手指', 'hand_fit': '拟合左右手掌椭球',
+                     'colliders': '建立身体连续碰撞缓存', 'collider_seed': '拆分身体碰撞区域',
+                     'collider_pack': '整理身体碰撞缓存', 'planes': '筛选有效身体碰撞平面',
                      'refit_hands': '重包修正后混合腕缝'}.get(stage, '处理进度')
             status('%s %d/%d' % (label, int(current), int(total)))
         hand = build_hand_geometry(geo, meta, matrices, progress=progress)
         model = FullLimbModel(matrices, quaternions, location_bases, geo, meta,
                               hand=hand, margin=float(settings.margin) / scale)
         solver = FullLimbSolver(model, collider, matrices, progress)
+        solver.stationary_spans = stationary_spans(quaternions, locations)
+        report['stationary_source_holds'] = [
+            {'parameter': p, 'start': int(frames[a]), 'end': int(frames[b])}
+            for p, a, b in solver.stationary_spans]
+        if solver.stationary_spans:
+            status('静止段保护：%d 个通道共享连续修正姿态；仍检测身体与双手' % len(solver.stationary_spans))
         solver.velocity = float(settings.velocity_weight)
         solver.acceleration = float(settings.acceleration_weight)
         solver.pose_weights[[0, 3]] = float(getattr(settings, 'upper_pose_weight', 100.))
@@ -279,6 +323,7 @@ def run_job(scene, settings, status):
             yield None
         # Use the complete body planes when reporting either proxy endpoint.
         solver.body.restore_full_planes()
+        status('计算原动作整段碰撞指标')
         report['proxy']['baseline'] = full_metrics(model, solver, np.zeros((len(frames), 8, 3)))
         report['proxy']['hand_geometry'] = hand.calibration
         report['proxy']['scope'] = ('身体与椭球/采样代理的残差；不等同于真实表面穿透深度；'
@@ -297,6 +342,7 @@ def run_job(scene, settings, status):
         # refitted only if a hand category failed. At most three warm passes.
         for attempt in range(4):
             solver.body.restore_full_planes()
+            status('计算修正后整段碰撞指标（复核轮次 %d/4）' % (attempt + 1))
             corrected = full_metrics(model, solver, delta)
             report['proxy']['corrected'] = corrected
             report['proxy']['body_field'] = solver.body.report

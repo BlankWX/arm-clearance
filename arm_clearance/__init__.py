@@ -1,7 +1,7 @@
 bl_info = {
     'name':'Arm Clearance · 连续手臂与手部避碰',
     'author':'BlankWX',
-    'version':(0,2,3),
+    'version':(0,2,7),
     'blender':(4,4,0),
     'location':'3D 视图 > 侧栏 > 手臂避碰',
     'description':'整段动作求解双臂、手掌和手指避碰，优先保留大臂姿态，保留手指动画与原动作',
@@ -11,8 +11,10 @@ bl_info = {
 import bpy
 import time
 import traceback
+import sys
 from bpy.props import PointerProperty,StringProperty,FloatProperty,IntProperty,BoolProperty
 from .pipeline_v2 import run_job, _slot_for
+from .progress import ConsoleProgress, show_system_console
 
 
 def _show_action(context, arm, action):
@@ -56,6 +58,7 @@ class AC_Settings(bpy.types.PropertyGroup):
     report_name:StringProperty()
     busy:BoolProperty(default=False,options={'SKIP_SAVE'})
     advanced:BoolProperty(name='骨骼与高级设置',default=False)
+    console_auto_open:BoolProperty(name='烘焙时显示控制台',default=True,description='Windows 下开始烘焙时显示系统控制台，查看阶段、组数、步数和耗时')
 
 
 class AC_OT_autofill(bpy.types.Operator):
@@ -73,23 +76,61 @@ class AC_OT_autofill(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class AC_OT_console(bpy.types.Operator):
+    bl_idname='arm_clearance.console';bl_label='显示系统控制台'
+    @classmethod
+    def poll(cls,context):return sys.platform=='win32' and not bpy.app.background
+    def execute(self,context):
+        if not show_system_console(bpy.ops.wm.console_toggle, bpy.app.background):
+            self.report({'WARNING'},'无法显示系统控制台，请从窗口菜单打开')
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 class AC_OT_bake(bpy.types.Operator):
     bl_idname='arm_clearance.bake';bl_label='分析并烘焙场景范围';bl_options={'REGISTER'}
-    _timer=None;_job=None
+    _timer=None;_job=None;_console=None
     @classmethod
     def poll(cls,context):return not context.scene.arm_clearance.busy
     def cleanup(self,context):
-        if self._job is not None:self._job.close();self._job=None
-        if self._timer is not None:context.window_manager.event_timer_remove(self._timer);self._timer=None
-        context.scene.arm_clearance.busy=False
-        for area in context.screen.areas:area.tag_redraw()
+        try:
+            if self._job is not None:
+                self._job.close()
+        except BaseException as error:
+            if self._console is not None:self._console.finish('error',str(error))
+            raise
+        finally:
+            self._job=None
+            try:
+                if self._timer is not None:context.window_manager.event_timer_remove(self._timer)
+            finally:
+                self._timer=None
+                context.scene.arm_clearance.busy=False
+                if self._console is not None:
+                    if not self._console.finished:context.scene.arm_clearance.status='已取消，本次运行已结束'
+                    self._console.finish('cancelled','用户取消，本次运行已结束')
+                if context.screen:
+                    for area in context.screen.areas:area.tag_redraw()
     def execute(self,context):
-        if context.screen.is_animation_playing:bpy.ops.screen.animation_cancel(restore_frame=False)
-        s=context.scene.arm_clearance;s.busy=True
+        if context.screen and context.screen.is_animation_playing:bpy.ops.screen.animation_cancel(restore_frame=False)
+        s=context.scene.arm_clearance
+        if s.console_auto_open:show_system_console(bpy.ops.wm.console_toggle,bpy.app.background)
+        self._console=ConsoleProgress()
+        self._console.start('场景范围 %d–%d，共 %d 帧' % (
+            context.scene.frame_start,context.scene.frame_end,
+            max(0,context.scene.frame_end-context.scene.frame_start+1)))
+        s.busy=True
         def status(message):s.status=message
-        self._job=run_job(context.scene,s,status)
-        self._timer=context.window_manager.event_timer_add(.1,window=context.window)
-        context.window_manager.modal_handler_add(self)
+        try:
+            self._job=run_job(context.scene,s,status,console=self._console)
+            self._timer=context.window_manager.event_timer_add(.1,window=context.window)
+            context.window_manager.modal_handler_add(self)
+        except Exception as error:
+            s.status='启动失败：'+str(error)
+            self._console.finish('error',str(error))
+            self.cleanup(context)
+            self.report({'ERROR'},str(error))
+            return {'CANCELLED'}
         return {'RUNNING_MODAL'}
     def modal(self,context,event):
         if event.type=='ESC':
@@ -157,7 +198,7 @@ class AC_PT_panel(bpy.types.Panel):
         col.prop(s,'margin');col.prop(s,'upper_pose_weight');col.prop(s,'advanced',icon='PREFERENCES')
         if s.advanced:
             box=col.box()
-            for prop in ('upper_left','fore_left','upper_right','fore_right','wrist_left','wrist_right','wrist_translation_limit','velocity_weight','acceleration_weight','iterations','collider_ratio'):box.prop(s,prop)
+            for prop in ('upper_left','fore_left','upper_right','fore_right','wrist_left','wrist_right','wrist_translation_limit','velocity_weight','acceleration_weight','iterations','collider_ratio','console_auto_open'):box.prop(s,prop)
         col.operator('arm_clearance.bake',icon='ACTION')
         col.operator('arm_clearance.compare',icon='ARROW_LEFTRIGHT')
         arm=s.armature
@@ -168,6 +209,7 @@ class AC_PT_panel(bpy.types.Panel):
             box.label(text='烘焙已保留，复核未通过' if review.get('arm_clearance_validation_status') == 'needs_review'
                            else '烘焙已保留，复核未完成',icon='ERROR')
             box.label(text='可切换查看；保存工程即可保留数据')
+        if sys.platform=='win32':l.operator('arm_clearance.console',icon='CONSOLE')
         l.separator();l.label(text=s.status[:60],icon='INFO')
         if s.busy:l.label(text='Esc 可取消；优化期间请勿编辑骨架')
         l.label(text='手掌、手指参与检测；保留手指原动画')
@@ -175,7 +217,7 @@ class AC_PT_panel(bpy.types.Panel):
         if s.report_name:l.label(text='详细指标见文本编辑器中的报告')
 
 
-classes=(AC_Settings,AC_OT_autofill,AC_OT_bake,AC_OT_compare,AC_OT_previous,AC_PT_panel)
+classes=(AC_Settings,AC_OT_autofill,AC_OT_console,AC_OT_bake,AC_OT_compare,AC_OT_previous,AC_PT_panel)
 def register():
     for cls in classes:bpy.utils.register_class(cls)
     bpy.types.Scene.arm_clearance=PointerProperty(type=AC_Settings)

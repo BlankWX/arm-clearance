@@ -35,7 +35,7 @@ def main():
     license_bytes = (ROOT / 'LICENSE').read_bytes()
     assert b'GNU GENERAL PUBLIC LICENSE' in license_bytes and b'Version 3, 29 June 2007' in license_bytes
     modules = sorted((ROOT / 'arm_clearance').glob('*.py'))
-    assert len(modules) == 13, 'Review the release file list after changing module layout'
+    assert len(modules) == 16, 'Review the release file list after changing module layout'
     install_entries = {}
     for path in modules:
         data = path.read_bytes()

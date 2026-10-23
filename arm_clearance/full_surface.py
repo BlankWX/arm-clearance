@@ -299,6 +299,8 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
     import bpy
     from mathutils.bvhtree import BVHTree
 
+    if status:
+        status('真实网格复核：按骨骼权重拆分身体、双臂与手部')
     prepared = build_surface_parts(geo, meta, body, shoulder_fraction, own_forearm_cutoff)
     triangles, parts = prepared['triangles'], prepared['parts']
     n_vertices = len(geo['vertices'])
@@ -315,6 +317,8 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
     if own_hand_arm:
         pairs.extend([(OWN_CATEGORY, 'hand.L', 'own_arm.L'),
                       (OWN_CATEGORY, 'hand.R', 'own_arm.R')])
+    if status:
+        status('真实网格复核：建立连通分区')
     components = {name: _components(triangles, ids) for name, ids in parts.items()}
     if include_self_hand:
         # These are diagnostics only: rotating a wrist cannot remove relative
@@ -338,6 +342,20 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
             for i, a in enumerate(branch_parts):
                 for b in branch_parts[i + 1:]:
                     pairs.append(('same-side-finger-diagnostic', a, b))
+    # Preserve original polygon order and winding while removing vertices
+    # unreferenced by each part. Collision records and seam checks still use
+    # the original global face/vertex IDs below.
+    part_vertices = {}
+    part_polygons = {}
+    for name, ids in parts.items():
+        vertices, inverse = np.unique(triangles[ids], return_inverse=True)
+        part_vertices[name] = vertices
+        part_polygons[name] = inverse.reshape(-1, 3).tolist()
+    closed_components = {name: [component for component in group if component['closed']]
+                         for name, group in components.items()}
+    component_polygons = {(name, int(component['faces'][0])):
+                          triangles[component['faces']].tolist()
+                          for name, group in closed_components.items() for component in group}
     main_categories = CATEGORIES + ((OWN_CATEGORY,) if own_hand_arm else ())
     category_names = main_categories + (('same-side-finger-diagnostic',) if include_self_hand else ())
     result = {
@@ -386,8 +404,9 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
             diagonal = max(float(np.linalg.norm(np.ptp(coords, axis=0))), 1e-6)
             epsilon = max(diagonal * 1e-7, 1e-9)
             full = coords.tolist()
-            trees = {name: (BVHTree.FromPolygons(full, triangles[ids].tolist(), all_triangles=True)
-                            if len(ids) else None) for name, ids in parts.items()}
+            trees = {name: (BVHTree.FromPolygons(coords[part_vertices[name]].tolist(), polygons,
+                                                all_triangles=True)
+                            if polygons else None) for name, polygons in part_polygons.items()}
             closed_trees = {}
             record = {'frame': float(frame), 'categories': {c: {'pair_count': 0, 'pairs': [],
                       'containments': [], 'proxies': []} for c in category_names}}
@@ -414,9 +433,7 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
                 # With no surface crossing, one representative per connected
                 # source component is sufficient for a fully embedded case.
                 for source, target in ((name_a, name_b), (name_b, name_a)):
-                    for component in components[target]:
-                        if not component['closed']:
-                            continue
+                    for component in closed_components[target]:
                         key = (target, int(component['faces'][0]))
                         target_coords = coords[component['vertices']]
                         low, high = target_coords.min(axis=0), target_coords.max(axis=0)
@@ -427,7 +444,7 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
                                 continue
                             if key not in closed_trees:
                                 closed_trees[key] = BVHTree.FromPolygons(
-                                    full, triangles[component['faces']].tolist(), all_triangles=True)
+                                    full, component_polygons[key], all_triangles=True)
                             if _inside_closed(closed_trees[key], point, epsilon, diagonal):
                                 out['containments'].append({'source_part': source, 'target_part': target,
                                     'source_vertex': vertex, 'source_face': int(candidate['faces'][0]),

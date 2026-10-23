@@ -24,9 +24,16 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ('腕.L', 'ひじ.L', '手首.L', '腕.R', 'ひじ.R', '手首.R')
 
 
+def source_version():
+    tree = ast.parse((ROOT/'arm_clearance/__init__.py').read_bytes())
+    info = next(ast.literal_eval(node.value) for node in tree.body
+                if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'bl_info' for t in node.targets))
+    return '.'.join(map(str, info['version']))
+
+
 def arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--zip', dest='zip_path', default=globals().get('AC_V2_ZIP', ROOT/'dist/arm_clearance-v0.2.3.zip'))
+    parser.add_argument('--zip', dest='zip_path', default=globals().get('AC_V2_ZIP', ROOT/('dist/arm_clearance-v' + source_version() + '.zip')))
     parser.add_argument('--report', default=globals().get('AC_V2_DISTRIBUTION_REPORT', ROOT/'build/test-results/distribution.json'))
     parser.add_argument('--skip-synthetic', action='store_true')
     return parser.parse_args(sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else [])
@@ -36,7 +43,7 @@ def dependency_audit(path):
     required = {'arm_clearance/__init__.py', 'arm_clearance/pipeline_v2.py',
                 'arm_clearance/pipeline.py', 'arm_clearance/solver_v2.py',
                 'arm_clearance/solver.py', 'arm_clearance/solver_v2_derivatives.py',
-                'arm_clearance/baking.py',
+                'arm_clearance/baking.py', 'arm_clearance/stationary.py', 'arm_clearance/progress.py', 'arm_clearance/temporal.py',
                 'arm_clearance/hand_geometry.py', 'arm_clearance/arm_geometry.py',
                 'arm_clearance/body_field.py', 'arm_clearance/full_surface.py'}
     blender_modules = {'bpy', 'bmesh', 'mathutils', 'numpy', 'gpu', 'gpu_extras', 'blf'}
@@ -207,10 +214,11 @@ def main(options):
                         upper_right='腕.R', fore_right='ひじ.R', wrist_right='手首.R')
         assert all(getattr(settings, key) == value for key, value in expected.items())
         for key in ('armature', 'body_mesh', 'margin', 'upper_pose_weight', 'wrist_translation_limit',
-                    'iterations', 'velocity_weight', 'acceleration_weight', 'report_name', 'busy'):
+                    'iterations', 'velocity_weight', 'acceleration_weight', 'report_name', 'busy', 'console_auto_open'):
             assert key in settings.bl_rna.properties, key
+        assert settings.console_auto_open is True
         assert settings.upper_pose_weight > 0 and settings.wrist_translation_limit >= 0
-        operators = ('autofill', 'bake', 'compare', 'previous')
+        operators = ('autofill', 'console', 'bake', 'compare', 'previous')
         for name in operators:
             assert getattr(bpy.ops.arm_clearance, name).get_rna_type() is not None, name
         panel = bpy.types.Panel.bl_rna_get_subclass_py('AC_PT_panel')

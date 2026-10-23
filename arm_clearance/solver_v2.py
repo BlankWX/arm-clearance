@@ -81,7 +81,9 @@ class FullLimbSolver(ClipSolver):
         yield from self.body.prepare()
         self.body.narrow_band=float(self.model.radii.max()+self.model.margin+.006)
         if hasattr(self.body,'update_active_planes'):
+            self.progress('planes', 0, 1)
             self.body.update_active_planes(self.model.original_points)
+            self.progress('planes', 1, 1)
 
     def optimize_staged(self,iterations=600,initial=None,stage_iterations=150,free_frames=None):
         delta=np.zeros((self.model.n,8,3)) if initial is None else np.asarray(initial).copy()
@@ -89,6 +91,7 @@ class FullLimbSolver(ClipSolver):
         self.optimization_stage_count=len(stages)
         for stage_index,start in enumerate(stages,1):
             self.optimization_stage_index=stage_index
+            self.progress('solve_stage', 0, min(stage_iterations,iterations-start))
             if hasattr(self.body,'update_active_planes'):
                 self.body.update_active_planes(self.model.points(delta))
             for value in self.optimize(min(stage_iterations,iterations-start),initial=delta,free_frames=free_frames):

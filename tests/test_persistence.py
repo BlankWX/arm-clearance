@@ -9,6 +9,7 @@ No MCP connection or existing user project is used.
 """
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -24,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 import arm_clearance as package
 from arm_clearance import pipeline_v2 as pipeline
 from arm_clearance.baking import channels
+from arm_clearance.progress import ConsoleProgress
 
 TARGETS = ('腕.L', 'ひじ.L', '手首.L', '腕.R', 'ひじ.R', '手首.R')
 FINGER = '人指１.L'
@@ -144,7 +146,7 @@ class DummySolver:
     def prepare(self):
         yield None
     def optimize_staged(self, *args, **kwargs):
-        self.progress('solve', 0, 1)
+        self.progress('solve', 0, 1, {'energy': 123.45, 'body_max_mm': 0.})
         if kwargs.get('free_frames') is not None:
             self.last_optimization_scope = {'masked': True}
         self.history.append({'synthetic': True})
@@ -212,12 +214,27 @@ def save_manifest(case, scene, arm, source, prior, slot_id, settings, report, de
     return path
 
 
+
+class RecordingConsoleProgress(ConsoleProgress):
+    """Observe emitted terminal output without depending on its display prefix."""
+    def __init__(self, case):
+        self.capture = io.StringIO()
+        self.terminal_emissions = []
+        super().__init__(scope='persistence:' + case, stream=self.capture)
+    def finish(self, outcome, detail=''):
+        before = self.capture.getvalue()
+        super().finish(outcome, detail)
+        if self.capture.getvalue() != before:
+            self.terminal_emissions.append(outcome)
+
+
 def build_case(case):
     scene, arm, source, prior, slot_id, settings = fixture()
     source_hash, prior_hash = digest(source), digest(prior)
     original = install_doubles(case, arm)
+    console = RecordingConsoleProgress(case)
     try:
-        job = pipeline.run_job(scene, settings, lambda message: setattr(settings, 'status', message))
+        job = pipeline.run_job(scene, settings, lambda message: setattr(settings, 'status', message), console=console)
         if case == 'early_cancel':
             next(job)
             job.close()
@@ -242,6 +259,20 @@ def build_case(case):
     report_text = bpy.data.texts[settings.report_name]
     assert report_text.use_fake_user, 'Report Text must survive unreferenced saves and appends'
     report = json.loads(report_text.as_string())
+    expected_outcome = ('complete' if case == 'success' else
+                        'needs_review' if case in ('surface', 'deep_proxy') else
+                        'cancelled' if case in ('cancel', 'early_cancel') else 'error')
+    assert console.finished and console.outcome == expected_outcome
+    assert console.terminal_emissions == [expected_outcome], console.terminal_emissions
+    assert console.capture.getvalue().count('[' + expected_outcome + ']') == 1
+    assert all('[' + other + ']' not in console.capture.getvalue()
+               for other in ('complete', 'needs_review', 'cancelled', 'error') if other != expected_outcome)
+    assert report['status'] == console.outcome
+    assert console.capture.getvalue() and console.last_message
+    assert '读取原动作' in console.capture.getvalue()
+    if case != 'early_cancel':
+        assert '主优化 第1/1组' in console.capture.getvalue()
+    (OUT / (case + '.console.log')).write_text(console.capture.getvalue(), encoding='utf8')
     assert digest(source) == source_hash and digest(prior) == prior_hash
     assert scene.frame_current == 2 and abs(scene.frame_subframe - .25) < 1e-6
     assert arm.animation_data.action_slot.identifier == slot_id

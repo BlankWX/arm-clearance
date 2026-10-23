@@ -82,14 +82,16 @@ def _convex_directions(cloud, fallback):
         normals = []; seen = set()
         for face in faces:
             normal = np.array(face.normal, dtype=np.float64)
-            if np.linalg.norm(normal) < .9:
+            length = np.linalg.norm(normal)
+            if length < .9:
                 continue
             if np.dot(normal, np.array(face.verts[0].co)-centre) < 0.:
                 normal = -normal
-            normal /= np.linalg.norm(normal)
+            # Negating a normal preserves its norm exactly; reuse that result.
+            normal /= length
             # Only merge numerically identical planes; important anatomical
             # normals must not be discarded merely to meet a plane budget.
-            signature = tuple(np.round(normal*1e7).astype(int))
+            signature = tuple(round(float(component)) for component in normal*1e7)
             if signature not in seen:
                 seen.add(signature); normals.append(normal)
         if len(normals) < 4:
@@ -205,7 +207,9 @@ class TightBodyField:
     def prepare(self):
         """Cache all posed support offsets; yield periodically for UI updates."""
         self.prepared = False
+        self.progress('collider_seed', 0, 1)
         self.regions = self._region_seeds()
+        self.progress('collider_seed', 1, 1)
         vertices = np.asarray(self.collider['vertices'], dtype=np.float64)
         joint = np.asarray(self.collider['joint'], dtype=np.int64)
         weight = np.asarray(self.collider['weight'], dtype=np.float64)
@@ -240,6 +244,7 @@ class TightBodyField:
             if frame % 20 == 0:
                 self.progress('colliders', frame, self.n)
                 yield None
+        self.progress('collider_pack', 0, len(self.regions))
         maximum_planes = 0
         for region in self.regions:
             counts = np.array([len(v) for v in region['plane_frames']], dtype=np.int32)
@@ -441,7 +446,12 @@ class TightBodyField:
                 query_directions = region['directions'][query_frames]
                 plane_values = np.einsum('ai,afi->af', local, query_directions)-region['offsets'][query_frames]
                 maximum = plane_values.max(axis=1)
-                weights = np.exp((plane_values-maximum[:, None])/self.plane_tau)
+                # The raw plane values are dead after the maximum. Keep the
+                # same subtract/divide/exp sequence while reusing its buffer.
+                weights = plane_values
+                weights -= maximum[:, None]
+                weights /= self.plane_tau
+                np.exp(weights, out=weights)
                 total = weights.sum(axis=1)
                 plane_distance = maximum+self.plane_tau*np.log(total/region['counts'][query_frames])
                 local_normal = np.einsum('af,afi->ai', weights, query_directions)/total[:, None]
@@ -460,7 +470,10 @@ class TightBodyField:
                     point = flat[point_ids[inside]]
                     box_planes = np.concatenate((point-hi[point_ids[inside]], lo[point_ids[inside]]-point), axis=1)
                     box_max = box_planes.max(axis=1)
-                    box_weights = np.exp((box_planes-box_max[:, None])/self.plane_tau)
+                    box_weights = box_planes
+                    box_weights -= box_max[:, None]
+                    box_weights /= self.plane_tau
+                    np.exp(box_weights, out=box_weights)
                     box_total = box_weights.sum(axis=1)
                     box_d[inside] = box_max+self.plane_tau*np.log(box_total/6.)
                     box_g[inside] = (box_weights[:, :3]-box_weights[:, 3:])/box_total[:, None]
