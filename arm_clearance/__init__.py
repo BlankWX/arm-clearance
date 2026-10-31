@@ -1,7 +1,7 @@
 bl_info = {
     'name':'Arm Clearance · 连续手臂与手部避碰',
     'author':'BlankWX',
-    'version':(0,2,7),
+    'version':(0,2,12),
     'blender':(4,4,0),
     'location':'3D 视图 > 侧栏 > 手臂避碰',
     'description':'整段动作求解双臂、手掌和手指避碰，优先保留大臂姿态，保留手指动画与原动作',
@@ -44,12 +44,12 @@ class AC_Settings(bpy.types.PropertyGroup):
     fore_left:StringProperty(name='左前臂',default='ひじ.L')
     upper_right:StringProperty(name='右上臂',default='腕.R')
     fore_right:StringProperty(name='右前臂',default='ひじ.R')
-    wrist_left:StringProperty(name='左手腕',default='手首.L',description='允许旋转和少量平移；其下手掌与手指参与碰撞，保留手指原动画')
+    wrist_left:StringProperty(name='左手腕',default='手首.L',description='只允许六目标骨旋转；保留原位移、缩放及手指动画')
     wrist_right:StringProperty(name='右手腕',default='手首.R')
     body_materials:StringProperty(name='检测材质',default='Body,絲襪,高跟鞋,颜',description='按材质筛选身体碰撞面的候选范围，身体与双臂按骨骼权重区分；英文逗号分隔；留空使用除双臂外的全部材质，请勿包含头发和饰物')
     margin:FloatProperty(name='安全间距',default=.001,min=0.,max=.03,subtype='DISTANCE',unit='LENGTH')
     upper_pose_weight:FloatProperty(name='大臂姿态保留',default=100.,min=1.,max=5000.,description='越高越倾向由前臂和手腕承担修正；仍以实际表面检测为准')
-    wrist_translation_limit:FloatProperty(name='手腕平移软限制',default=.010,min=0.,max=.05,subtype='DISTANCE',unit='LENGTH',description='超出该距离增加惩罚；不是严格上限')
+    wrist_translation_limit:FloatProperty(name='腕部新增位移',default=0.,min=0.,max=0.,subtype='DISTANCE',unit='LENGTH',options={'HIDDEN'},description='硬限制为零；保留源动作原位移')
     collider_ratio:FloatProperty(name='身体网格保留率',default=.10,min=.03,max=.5)
     velocity_weight:FloatProperty(name='修正速度约束',default=10.,min=.01,max=1000.)
     acceleration_weight:FloatProperty(name='修正加速度约束',default=3000.,min=.01,max=100000.)
@@ -188,7 +188,7 @@ class AC_OT_previous(bpy.types.Operator):
 
 
 class AC_PT_panel(bpy.types.Panel):
-    bl_label='连续手臂避碰';bl_idname='AC_PT_panel';bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='手臂避碰'
+    bl_label='连续手臂避碰  v0.2.12';bl_idname='AC_PT_panel';bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='手臂避碰'
     def draw(self,context):
         s=context.scene.arm_clearance;l=self.layout
         col=l.column();col.enabled=not s.busy
@@ -198,7 +198,7 @@ class AC_PT_panel(bpy.types.Panel):
         col.prop(s,'margin');col.prop(s,'upper_pose_weight');col.prop(s,'advanced',icon='PREFERENCES')
         if s.advanced:
             box=col.box()
-            for prop in ('upper_left','fore_left','upper_right','fore_right','wrist_left','wrist_right','wrist_translation_limit','velocity_weight','acceleration_weight','iterations','collider_ratio','console_auto_open'):box.prop(s,prop)
+            for prop in ('upper_left','fore_left','upper_right','fore_right','wrist_left','wrist_right','velocity_weight','acceleration_weight','iterations','collider_ratio','console_auto_open'):box.prop(s,prop)
         col.operator('arm_clearance.bake',icon='ACTION')
         col.operator('arm_clearance.compare',icon='ARROW_LEFTRIGHT')
         arm=s.armature
@@ -214,7 +214,6 @@ class AC_PT_panel(bpy.types.Panel):
         if s.busy:l.label(text='Esc 可取消；优化期间请勿编辑骨架')
         l.label(text='手掌、手指参与检测；保留手指原动画')
         l.label(text='仅修改双臂与手腕；烘焙后正常空格播放')
-        if s.report_name:l.label(text='详细指标见文本编辑器中的报告')
 
 
 classes=(AC_Settings,AC_OT_autofill,AC_OT_console,AC_OT_bake,AC_OT_compare,AC_OT_previous,AC_PT_panel)

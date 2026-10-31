@@ -1,8 +1,0 @@
-* text=auto eol=lf
-# Preserve verified Python source bytes, including existing line endings.
-*.py -text
-*.md text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-LICENSE -text
-*.zip binary
