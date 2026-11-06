@@ -1,7 +1,7 @@
 bl_info = {
     'name':'Arm Clearance · 连续手臂与手部避碰',
     'author':'BlankWX',
-    'version':(0,2,12),
+    'version':(0,2,13),
     'blender':(4,4,0),
     'location':'3D 视图 > 侧栏 > 手臂避碰',
     'description':'整段动作求解双臂、手掌和手指避碰，优先保留大臂姿态，保留手指动画与原动作',
@@ -188,7 +188,7 @@ class AC_OT_previous(bpy.types.Operator):
 
 
 class AC_PT_panel(bpy.types.Panel):
-    bl_label='连续手臂避碰  v0.2.12';bl_idname='AC_PT_panel';bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='手臂避碰'
+    bl_label='连续手臂避碰  v0.2.13';bl_idname='AC_PT_panel';bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='手臂避碰'
     def draw(self,context):
         s=context.scene.arm_clearance;l=self.layout
         col=l.column();col.enabled=not s.busy

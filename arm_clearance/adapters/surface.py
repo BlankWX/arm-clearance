@@ -133,7 +133,9 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
                 evaluated.to_mesh_clear()
             diagonal = max(float(np.linalg.norm(np.ptp(coords, axis=0))), 1e-6)
             epsilon = max(diagonal * 1e-7, 1e-9)
-            full = coords.tolist()
+            # A full Python vertex list is needed only for a closed-component
+            # containment query. Most samples use only compact part BVHs.
+            full = None
             trees = {name: (BVHTree.FromPolygons(coords[part_vertices[name]].tolist(), polygons,
                                                 all_triangles=True)
                             if polygons else None) for name, polygons in part_polygons.items()}
@@ -173,6 +175,8 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
                             if np.any(point <= low + epsilon) or np.any(point >= high - epsilon):
                                 continue
                             if key not in closed_trees:
+                                if full is None:
+                                    full = coords.tolist()
                                 closed_trees[key] = BVHTree.FromPolygons(
                                     full, component_polygons[key], all_triangles=True)
                             if _inside_closed(closed_trees[key], point, epsilon, diagonal):

@@ -431,7 +431,10 @@ class TightBodyField:
         """
         union_distance = None; union_normal = None; union_hessian = None
         for region in self.regions:
-            lo = region['bounds'][frame_ids, 0]; hi = region['bounds'][frame_ids, 1]
+            # Gather each frame's two bounds together; the views stay local to
+            # this query and do not change the prepared regional geometry.
+            bounds = np.take(region['bounds'], frame_ids, axis=0)
+            lo = bounds[:, 0]; hi = bounds[:, 1]
             box_vector = np.maximum(flat-hi, 0.)-np.maximum(lo-flat, 0.)
             box_distance = np.linalg.norm(box_vector, axis=-1)
             active = box_distance <= self.narrow_band
@@ -444,7 +447,10 @@ class TightBodyField:
                 relative = flat[point_ids]-region['origins'][query_frames]
                 local = np.einsum('ni,nij->nj', relative, region['rotations'][query_frames])
                 query_directions = region['directions'][query_frames]
-                plane_values = np.einsum('ai,afi->af', local, query_directions)-region['offsets'][query_frames]
+                plane_values = np.einsum('ai,afi->af', local, query_directions)
+                # The contraction owns this buffer. Subtract in the original
+                # order without allocating a second point-by-plane array.
+                plane_values -= region['offsets'][query_frames]
                 maximum = plane_values.max(axis=1)
                 # The raw plane values are dead after the maximum. Keep the
                 # same subtract/divide/exp sequence while reusing its buffer.
@@ -454,7 +460,9 @@ class TightBodyField:
                 np.exp(weights, out=weights)
                 total = weights.sum(axis=1)
                 plane_distance = maximum+self.plane_tau*np.log(total/region['counts'][query_frames])
-                local_normal = np.einsum('af,afi->ai', weights, query_directions)/total[:, None]
+                # The plane axis stays in its original order. Express this
+                # weighted sum as a batch of row-vector/matrix products.
+                local_normal = (weights[:, None, :]@query_directions)[:, 0]/total[:, None]
                 rotation = region['rotations'][query_frames]
                 plane_normal = np.einsum('nij,nj->ni', rotation, local_normal)
                 # Plane maxima underestimate Euclidean distance outside thin
@@ -492,7 +500,12 @@ class TightBodyField:
                     selected = np.flatnonzero(wanted)
                     if len(selected):
                         selected_directions = query_directions[selected]
-                        second = np.einsum('af,afi,afj->aij', weights[selected], selected_directions, selected_directions, optimize=True)/total[selected, None, None]
+                        # Batched 3xF @ Fx3 evaluates the same weighted second
+                        # moment without planning a three-input contraction at
+                        # every region and solver trial. Keep plane order and
+                        # multiply each weight before reducing over planes.
+                        weighted_directions = weights[selected, :, None]*selected_directions
+                        second = (weighted_directions.swapaxes(-1, -2)@selected_directions)/total[selected, None, None]
                         selected_local_normal = local_normal[selected]
                         local_hessian = (second-np.einsum('ni,nj->nij', selected_local_normal, selected_local_normal))/self.plane_tau
                         selected_rotation = rotation[selected]
@@ -535,7 +548,9 @@ class TightBodyField:
                 # zero and the old Hessian is unchanged (weight_a == 1).  Avoid
                 # rebuilding/gathering that dense nine-component array for all
                 # points at every body slab; update only nonzero contributions.
-                union_hessian[~wanted] = 0.
+                # Broadcast the point mask across the nine matrix entries;
+                # preserve exactly the same zeroing before the sparse update.
+                np.copyto(union_hessian, 0., where=(~wanted)[:, None, None])
                 ids = np.flatnonzero(wanted & (weight_b > 0.))
                 if len(ids):
                     difference = union_normal[ids]-normal[ids]

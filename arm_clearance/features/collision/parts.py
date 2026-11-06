@@ -35,10 +35,21 @@ PART_NAMES = ('body', 'arm.L', 'hand.L', 'arm.R', 'hand.R')
 
 
 def _triangle_lookup_mask(triangles, selected):
+    """Match unordered vertex triples without per-face Python tuples."""
     selected = np.asarray(selected, dtype=np.int64).reshape(-1, 3)
-    wanted = {tuple(sorted(map(int, t))) for t in selected}
-    return np.fromiter((tuple(sorted(map(int, t))) in wanted for t in triangles),
-                       dtype=bool, count=len(triangles))
+    if not len(selected):
+        return np.zeros(len(triangles), dtype=bool)
+    # Structured keys compare the three integer IDs lexicographically. Face
+    # winding and duplicate faces do not affect membership; input order stays
+    # intact and no packed-key multiplication can overflow vertex IDs.
+    dtype = np.dtype([('a', np.int64), ('b', np.int64), ('c', np.int64)])
+    wanted = np.unique(np.ascontiguousarray(np.sort(selected, axis=1)).view(dtype).reshape(-1))
+    ordered = np.sort(np.asarray(triangles, dtype=np.int64).reshape(-1, 3), axis=1)
+    keys = np.ascontiguousarray(ordered).view(dtype).reshape(-1)
+    indices = np.searchsorted(wanted, keys)
+    result = indices < len(wanted)
+    result[result] = wanted[indices[result]] == keys[result]
+    return result
 
 
 def build_surface_parts(geo, meta, body=None, shoulder_fraction=.34,
@@ -155,7 +166,9 @@ def sample_frames(start, end, step=.5):
 def _components(triangles, face_ids):
     """Edge-connected face components and an orientation-free closed flag."""
     face_ids = np.asarray(face_ids, dtype=np.int32)
-    parent = np.arange(len(face_ids), dtype=np.int32)
+    # This scalar union-find loop benefits from Python integer indexing.
+    # Keep edge traversal, root selection and output ordering unchanged.
+    parent = list(range(len(face_ids)))
     edges = defaultdict(list)
     for local, face in enumerate(triangles[face_ids]):
         a, b, c = map(int, face)
