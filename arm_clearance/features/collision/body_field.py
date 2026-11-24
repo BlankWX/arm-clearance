@@ -357,7 +357,7 @@ class TightBodyField:
         self.report.pop('active_plane_cache', None)
 
     def distances(self, points, hessian=False, hessian_mask=None,
-                  hessian_distance_limit=None, contact_limit=None):
+                  hessian_distance_limit=None, contact_limit=None, frame_rows=None):
         """Return the regional field and its analytic gradient/Hessian.
 
         Optional Hessian mask/limit arrays broadcast to [frames,2,samples].
@@ -370,12 +370,13 @@ class TightBodyField:
         if not self.prepared:
             raise RuntimeError('Consume prepare() before querying the body field')
         points = np.asarray(points, dtype=np.float64)
-        if points.ndim != 4 or points.shape[0] != self.n or points.shape[1] != 2 or points.shape[-1] != 3:
+        rows = np.arange(self.n) if frame_rows is None else frame_rows
+        if points.ndim != 4 or points.shape[0] != len(rows) or points.shape[1] != 2 or points.shape[-1] != 3:
             raise ValueError('points must have shape [frames,2,samples,3] matching the cached clip')
         shape = points.shape[:-1]
         flat = points.reshape(-1, 3)
         count = int(np.prod(shape[1:]))
-        frame_ids = np.repeat(np.arange(self.n), count)
+        frame_ids = np.repeat(rows, count)
         wanted = (np.ones(len(flat), dtype=bool) if hessian_mask is None else
                   np.broadcast_to(np.asarray(hessian_mask, dtype=bool), shape).reshape(-1))
         limit = (None if hessian_distance_limit is None else
@@ -386,10 +387,11 @@ class TightBodyField:
             contact_limit = np.broadcast_to(np.asarray(contact_limit, dtype=np.float64), shape).reshape(-1)
             if not np.isfinite(contact_limit).all() or np.any(contact_limit < 0.):
                 raise ValueError('contact_limit must be finite and nonnegative')
-            posed = flat.reshape(self.n, count, 3)
-            nearest_squared = np.full((self.n, count), np.inf)
+            posed = flat.reshape(len(rows), count, 3)
+            nearest_squared = np.full((len(rows), count), np.inf)
             for region in self.regions:
-                lo = region['bounds'][:, None, 0]; hi = region['bounds'][:, None, 1]
+                bounds = region['bounds'] if frame_rows is None else region['bounds'][rows]
+                lo = bounds[:, None, 0]; hi = bounds[:, None, 1]
                 outside = np.maximum(posed-hi, 0.)-np.maximum(lo-posed, 0.)
                 np.minimum(nearest_squared, np.sum(outside*outside, axis=-1), out=nearest_squared)
             nearest_squared = nearest_squared.reshape(-1)
@@ -398,7 +400,7 @@ class TightBodyField:
             bias = self.plane_tau*np.log(2.)+self.union_tau*np.log(len(self.regions))
             keep = ((nearest_squared <= (contact_limit+bias+1e-12)**2)
                     | (nearest_squared == 0.))
-            counts = keep.reshape(self.n, count).sum(axis=1)
+            counts = keep.reshape(len(rows), count).sum(axis=1)
             self.last_contact_query = {
                 'points': int(len(flat)), 'possible_points': int(keep.sum()),
                 'original_points_per_frame': count,

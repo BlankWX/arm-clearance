@@ -3,15 +3,19 @@
 The numerical engine, repair policy, scene transaction, Action writer and real
 checker have separate owners. Modal yields retain the v0.2.12 positions.
 """
+from itertools import count
 import numpy as np
 from .contracts import CandidatePose
 from .composition import make_problem, partition_source
 from .adapters.job_io import BlenderJobIO
+from .adapters.deep_repair import recover, prepare_surface
+from .adapters.half_repair import repair_halves
+from .features.repair.half_search import isolated_half_frames
 from .adapters.action_io import bake_action
 from .adapters.surface import surface_check
 from .features.collision.hand_geometry import build_hand_geometry
 from .features.avoidance.metrics import full_metrics
-from .features.repair.policy import RepairPolicy
+from .features.repair.policy import RepairPolicy, SurfaceQuality
 from .features.baking import CandidateBaker
 from .features.safety.job import JobGuard
 from .features.safety.reporting import JobProgress
@@ -26,6 +30,9 @@ def _run_job(scene, settings, status):
     io = BlenderJobIO(scene, settings)
     guard = JobGuard(io)
     solver = None
+    best_action = None
+    best_quality = None
+    strategy = 0
     policy = RepairPolicy()
     report = guard.report
     try:
@@ -56,11 +63,10 @@ def _run_job(scene, settings, status):
             'wrist_translation_limit_metres': float(getattr(settings, 'wrist_translation_limit', .010)),
             'pose_weights': solver.pose_weights.tolist(), 'velocity_weight': solver.velocity,
             'acceleration_weight': solver.acceleration, 'iterations': int(settings.iterations),
-            'surface_step': .5, 'maximum_surface_repair_retries': 3,
+            'surface_step': .5, 'stagnation_strategies': policy.strategies,
             'upper_strong_soft_limit_degrees': '30 by default; up to 35 only in a second confirmed upper-arm/body repair time window',
-            'maximum_hand_refit_retries': 3, 'maximum_surface_verification_attempts': 4,
             'surface_repair_frame_half_window': 24.,
-            'refit_warm_iterations': 150, 'deep_body_proxy_reject_world_mm': 20.}
+            'refit_warm_iterations': 150, 'deep_body_proxy_reject_world_mm': guard.body_limit_mm}
         report['parameters']['source_fidelity'] = solver.fidelity_report()
         report['parameters']['source_motion'] = solver.motion_report()
         for _ in solver.prepare():
@@ -81,19 +87,19 @@ def _run_job(scene, settings, status):
         if delta.shape != (len(frames), 8, 3) or not np.isfinite(delta).all():
             raise ValueError('优化结果存在无效参数，已保留先前动作')
         baker = CandidateBaker(bake_action, io.discard_action, io.arm, io.source, io.targets)
-        for attempt in range(4):
+        for attempt in count():
             collision.restore_full_planes()
-            status('计算修正后整段碰撞指标（复核轮次 %d/4）' % (attempt + 1))
+            status('计算修正后整段碰撞指标（复核轮次 %d）' % (attempt + 1))
             corrected = full_metrics(model, solver, delta)
             report['proxy']['corrected'] = corrected
             report['proxy']['body_field'] = collision.body_report()
             report['proxy']['history'] = solver.history
-            status('写入六根骨骼旋转和双腕位置关键帧（复核轮次 %d/4）' % (attempt + 1))
+            status('写入六根骨骼旋转关键帧（复核轮次 %d）' % (attempt + 1))
             guard.write_report()
             yield None
-            previous_candidate = guard.candidate
             guard.candidate = baker.write(clip, CandidatePose(delta, model.quats(delta)))
-            baker.discard_replaced(previous_candidate)
+            report['attempts'].clear()
+            report['verification_count'] = attempt + 1
             attempt_report = guard.stage_candidate(corrected, attempt)
             yield None
             for surface in collision.verify(scene, io.arm, io.mesh, clip.geometry, clip.meta,
@@ -103,37 +109,115 @@ def _run_job(scene, settings, status):
                 attempt_report['surface_verification'] = surface
                 yield None
             surface = report['surface_verification']
-            if guard.verification_terminal(surface, corrected, clip.scale, attempt_report):
+            safe = guard.check_candidate(surface, corrected, clip.scale, attempt_report)
+            quality = SurfaceQuality.measure(surface)
+            accepted = safe and (best_quality is None or quality.improves(best_quality))
+            if accepted:
+                baker.discard_replaced(best_action)
+                best_action = guard.candidate
+                best_quality = quality
+                best_surface = surface
+                best_delta = delta.copy()
+                best_fields = solver.round_fields()
+                best_hand = model.hand
+                best_metrics = corrected
+                strategy = 0
+                if not quality.frames:
+                    break
+            elif best_action is None:
+                first = guard.candidate
+                work = first.copy()
+                accepted_work = False
+                try:
+                    io.ad.action = work
+                    io.ad.action_slot = io.slot_for(work, io.source_slot.identifier)
+                    deep = frames[np.asarray(corrected['body_frame_mm'])*clip.scale > guard.body_limit_mm]
+                    topology = prepare_surface(clip.geometry, clip.meta, clip.body)
+                    repaired = yield from recover(io, clip, work, delta, surface, deep, topology, holds, status)
+                    metrics = full_metrics(model, solver, repaired)
+                    status('超限补修结束，重新复核整段动作')
+                    for checked in collision.verify(scene, io.arm, io.mesh, clip.geometry, clip.meta,
+                                                    clip.body, io.start, io.end, status=status,
+                                                    step=.5, own_hand_arm=True):
+                        yield None
+                    passed_depth = guard.check_candidate(checked, metrics, clip.scale, {})
+                    after = SurfaceQuality.measure(checked)
+                    report['verification_count'] += 1
+                    if ((after.improves(quality) or after == quality) and
+                            metrics['body_max_mm'] <= corrected['body_max_mm']+1e-7):
+                        report['surface_verification'] = checked
+                        report['proxy']['corrected'] = metrics
+                        guard.candidate = work
+                        accepted_work = True
+                        baker.discard_replaced(first)
+                        if not passed_depth:
+                            report['validation_failure'] = 'deep_body_proxy_residual'
+                        elif after.frames:
+                            report['validation_failure'] = 'actual_surface_intersection'
+                    else:
+                        report['validation_failure'] = 'deep_body_proxy_residual'
+                finally:
+                    if not accepted_work:
+                        io.ad.action = first
+                        io.ad.action_slot = io.slot_for(first, io.source_slot.identifier)
+                        baker.discard_replaced(work)
                 break
-            attempt_report['historical_surface_failure_record_count'] = policy.record_failure(surface)
-            if guard.retries_exhausted(attempt):
+            else:
+                rejected = guard.candidate
+                guard.candidate = best_action
+                baker.discard_replaced(rejected)
+                report['surface_verification'] = best_surface
+                report['proxy']['corrected'] = best_metrics
+                strategy += 1
+            status('复核第 %d 轮：最佳剩余 %d 个采样，连续 %d 次无改善' %
+                   (attempt + 1, len(best_quality.frames), strategy))
+            if strategy == len(policy.strategies):
+                if isolated_half_frames(best_surface):
+                    guard.candidate = best_action.copy()
+                    changed = yield from repair_halves(io, clip, guard.candidate, best_surface, status)
+                    if changed:
+                        attempt_report = guard.stage_candidate(best_metrics, attempt+1)
+                        report['verification_count'] += 1
+                        for surface in collision.verify(scene, io.arm, io.mesh, clip.geometry, clip.meta,
+                                                        clip.body, io.start, io.end, status=status,
+                                                        step=.5, own_hand_arm=True):
+                            yield None
+                        if (guard.check_candidate(surface, best_metrics, clip.scale, attempt_report)
+                                and SurfaceQuality.measure(surface).improves(best_quality)):
+                            baker.discard_replaced(best_action)
+                            best_action = guard.candidate
+                            best_surface = surface
+                            report['surface_verification'] = surface
+                            if not surface['collision_samples']:
+                                break
+                    if guard.candidate != best_action:
+                        baker.discard_replaced(guard.candidate)
+                        guard.candidate = best_action
+                    report['surface_verification'] = best_surface
+                report['validation_failure'] = 'actual_surface_intersection'
                 break
             io.prepare_retry_source(clip)
-            status('将真实失败三角面映射为局部连续碰撞约束（%d/3）' % (attempt + 1))
+            delta = best_delta.copy()
+            model.replace_hand_envelopes(best_hand)
+            solver.set_round_fields(best_fields)
+            solver.history.clear()
+            progress.phase = '第 %d 轮补修：%s，剩余 %d 个采样，连续 %d 次无改善' % (
+                attempt + 1, policy.strategies[strategy], len(best_quality.frames), strategy)
+            status(progress.phase)
             yield None
-            plan = policy.plan(surface, model, clip.geometry, frames, attempt + 1,
-                               clip.scale, solver.round_fields())
-            solver.set_round_fields(plan.fields)
-            attempt_report['local_surface_repair'] = plan.evidence
-            attempt_report['failed_hand_categories'] = list(plan.failed_hand_categories)
-            if plan.failed_hand_categories:
-                status('仅对实际手部失败平滑重包修正后的手部簇（%d/3）' % (attempt + 1))
-                yield None
-                hand, refit_report = collision.refit(delta, clip)
-                attempt_report['corrected_hand_refit'] = refit_report
-                model.replace_hand_envelopes(hand)
-            attempt_report['repair_narrow_band_armature_units'] = collision.update_repair_band()
-            plan = policy.scope(plan, surface, frames)
-            attempt_report['repair_variable_frame_mask'] = plan.scope_evidence
-            guard.write_report()
-            progress.phase = '追加修复 第%d/3轮' % (attempt + 1)
-            for _ in solver.optimize_staged(150, initial=delta, free_frames=plan.free_frames):
-                yield None
-            if hasattr(solver, 'last_optimization_scope'):
-                attempt_report['repair_c2_control_scope'] = dict(solver.last_optimization_scope)
-            delta = np.asarray(solver.result)
-            if delta.shape != (len(frames), 8, 3) or not np.isfinite(delta).all():
-                raise ValueError('局部连续约束修复后的优化参数无效')
+            for target in policy.targets(best_surface, strategy):
+                plan = policy.plan(target, model, clip.geometry, frames, attempt + 1,
+                                   clip.scale, solver.round_fields(), strategy)
+                solver.set_round_fields(plan.fields)
+                if plan.failed_hand_categories:
+                    hand, _ = collision.refit(delta, clip)
+                    model.replace_hand_envelopes(hand)
+                collision.update_repair_band()
+                for _ in solver.optimize_staged(150, initial=delta, free_frames=plan.free_frames):
+                    yield None
+                delta = np.asarray(solver.result)
+                if delta.shape != (len(frames), 8, 3) or not np.isfinite(delta).all():
+                    raise ValueError('局部连续约束修复后的优化参数无效')
         return guard.finish()
     except GeneratorExit:
         guard.cancel()
@@ -144,4 +228,9 @@ def _run_job(scene, settings, status):
     finally:
         if solver is not None:
             solver.collision.restore_full_planes()
+        if not guard.complete and best_action is not None:
+            if guard.candidate is not None and guard.candidate != best_action:
+                baker.discard_replaced(guard.candidate)
+            guard.candidate = best_action
+            report['surface_verification'] = best_surface
         guard.cleanup()

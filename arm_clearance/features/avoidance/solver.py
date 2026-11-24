@@ -56,17 +56,19 @@ class SolveEngine(ControlOptimizer):
         for stage_index,start in enumerate(stages,1):
             self.optimization_stage_index=stage_index
             self.progress('solve_stage', 0, min(stage_iterations,iterations-start))
-            self.collision.begin_stage(delta)
-            for value in self.optimize(min(stage_iterations,iterations-start),initial=delta,free_frames=free_frames):
-                delta=value
-                yield value
-            self.collision.end_stage()
+            self.collision.begin_stage(delta, local=free_frames is not None)
+            try:
+                for value in self.optimize(min(stage_iterations,iterations-start),initial=delta,free_frames=free_frames):
+                    delta=value
+                    yield value
+            finally:
+                self.collision.end_stage()
         self.result=delta
 
     def objective(self,flat):
         m=self.model;x=project_parameters(m,np.asarray(flat).reshape(m.n,8,3))
         points,orientation,elbows,wrists=m.state(x)
-        collision,force,torque,detail=self.collision.evaluate(points,orientation)
+        collision,force,torque,detail=self.collision.evaluate(points,orientation,pose_parameters=x)
         factor=self.penalty/(m.length*m.length)
         energy=factor*collision;force*=factor;torque*=factor
         energy,force,ef,wf=self.fidelity.add_geometry(m,points,elbows,wrists,energy,force)

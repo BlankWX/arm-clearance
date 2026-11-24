@@ -7,9 +7,12 @@ The remaining ellipsoid support, forces and torques use the same formulae.
 import numpy as np
 
 
+PAIR_CHUNK_SIZE = 32
+
+
 def pair_contacts(points, covariance, radii, margin, own_mask, arm_count,
-                  need_gradient=True, chunk_size=32,
-                  mutual_weights=None,own_weights=None):
+                  need_gradient=True, chunk_size=PAIR_CHUNK_SIZE,
+                  mutual_weights=None,own_weights=None, chunk_stats=None):
     n,_,p,_=points.shape
     # Model radii are the largest local ellipsoid axes.  Exact rotations keep
     # those bounds, but imported pose/basis matrices can contain small shear.
@@ -31,7 +34,8 @@ def pair_contacts(points, covariance, radii, margin, own_mask, arm_count,
         possible=squared<bound*bound
         if mask is not None:possible &= mask[None]
         fi,ai,bi=np.nonzero(possible)
-        if not len(fi):return
+        if not len(fi):
+            return 0., 0, 0
         candidates+=len(fi)
         local_diff=diff[fi,ai,bi]
         length=np.sqrt(squared[fi,ai,bi]);inverse=1/np.maximum(length,1e-12)
@@ -43,7 +47,9 @@ def pair_contacts(points, covariance, radii, margin, own_mask, arm_count,
         depth=np.maximum(ra+rb+margin-length,0.)
         pair_weights=(1. if weights is None else np.maximum(
             weights[start+fi,side_a,ids_a[ai]],weights[start+fi,side_b,ids_b[bi]]))
-        energy+=float(np.sum(depth*depth*pair_weights));positive+=np.count_nonzero(depth)
+        contribution=float(np.sum(depth*depth*pair_weights))
+        active_count=int(np.count_nonzero(depth))
+        energy+=contribution;positive+=active_count
         np.maximum.at(frames,start+fi,depth)
         if need_gradient:
             active=depth>0.
@@ -58,12 +64,18 @@ def pair_contacts(points, covariance, radii, margin, own_mask, arm_count,
             np.add.at(torque,(start+fi,side_a,ids_a[ai]),2*weighted_depth[:,None]*np.cross(ca,direction)/ra[:,None])
             np.add.at(torque,(start+fi,side_b,ids_b[bi]),2*weighted_depth[:,None]*np.cross(cb,direction)/rb[:,None])
 
+        return contribution, len(local_diff), active_count
+
     all_ids=np.arange(p);arm_ids=np.arange(arm_count);hand_ids=np.arange(arm_count,p)
     for start in range(0,n,chunk_size):
         end=min(start+chunk_size,n)
-        evaluate(start,end,0,1,all_ids,all_ids,None,mutual_frames,mutual_weights)
+        mutual = evaluate(start,end,0,1,all_ids,all_ids,None,mutual_frames,mutual_weights)
+        if chunk_stats is not None:
+            chunk_stats.append(mutual)
         for side in range(2):
-            evaluate(start,end,side,side,arm_ids,hand_ids,own_mask[side],own_frames,own_weights)
+            own = evaluate(start,end,side,side,arm_ids,hand_ids,own_mask[side],own_frames,own_weights)
+            if chunk_stats is not None:
+                chunk_stats.append(own)
     return energy,force,torque,{'mutual_max':float(mutual_frames.max()),
         'own_max':float(own_frames.max()),'mutual_frames':mutual_frames,
         'own_frames':own_frames,'pair_candidates':candidates,'positive_pairs':int(positive)}

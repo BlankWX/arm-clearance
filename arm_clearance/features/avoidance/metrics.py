@@ -9,7 +9,7 @@ def full_metrics(model,solver,delta):
     angle=np.linalg.norm(delta[:,:6],axis=-1)*180/np.pi
     def stats(value):return {'mean':float(value.mean()),'p95':float(np.percentile(value,95)),'max':float(value.max())}
     body=contact['body'];worst=np.maximum(body.max((1,2)),np.maximum(contact['mutual_frames'],contact['own_frames']))
-    return {'frames':model.n,'body_max_mm':float(body.max()*1000),'mutual_max_mm':contact['mutual_max']*1000,
+    return {'frames':model.n,'body_max_mm':float(body.max()*1000), 'body_frame_mm':(body.max(axis=(1,2))*1000).tolist(),'mutual_max_mm':contact['mutual_max']*1000,
         'own_hand_arm_max_mm':contact['own_max']*1000,'frames_over_1mm':int(np.sum(worst>.001)),
         'frames_over_3mm':int(np.sum(worst>.003)),
         'upper_arm_degrees':stats(angle[:,(0,3)]),'forearm_degrees':stats(angle[:,(1,4)]),'wrist_degrees':stats(angle[:,(2,5)]),

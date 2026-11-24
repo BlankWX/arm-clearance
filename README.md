@@ -1,24 +1,24 @@
 # Arm Clearance · 连续手臂与手部避碰
 
-v0.2.13 是用于 Blender 的动作粗修插件。它按场景帧范围检测双臂、手掌和手指与身体及对侧上肢的碰撞，调整左右上臂、前臂和手腕六根骨骼的旋转，并把结果烘焙到新的 Action。手指沿用原动画，原 Action 可随时切回比较。
+v0.2.14 是用于 Blender 的动作粗修插件。它按场景帧范围检测双臂、手掌和手指与身体及对侧上肢的碰撞，调整左右上臂、前臂和手腕六根骨骼的旋转，并把结果烘焙到新的 Action。手指沿用原动画，原 Action 可随时切回比较。
 
 ## 安装与使用
 
-1. 在 [v0.2.13 发布页](https://github.com/BlankWX/arm-clearance/releases/tag/v0.2.13) 下载 `arm_clearance-v0.2.13.zip`，在 Blender「编辑 → 偏好设置 → 插件」中选择「从磁盘安装」并启用。更新后重启 Blender。
+1. 在 [v0.2.14 发布页](https://github.com/BlankWX/arm-clearance/releases/tag/v0.2.14) 下载 `arm_clearance-v0.2.14.zip`，在 Blender「编辑 → 偏好设置 → 插件」中选择「从磁盘安装」并启用。更新后重启 Blender。
 2. 备份工程，在 3D 视图侧栏打开「手臂避碰」，点击「识别当前角色」。核对骨架、蒙皮网格、参与检测的材质和左右六根目标骨。
 3. 设置场景开始帧和结束帧，点击「分析并烘焙场景范围」。面板及控制台显示进度，运行中可按 Esc 取消。
-4. 查看结果状态，切换原动作与修正动作播放对照。标为待修正的结果可继续手调。确认后自行保存工程。
+4. 首轮身体代理超过 20 毫米时，插件会自动分窗补修并复核整段。等待最终提示后，切换原动作与修正动作播放对照。标为待修正的结果可继续手调。确认后自行保存工程。
 
 ## 输出与适用范围
 
 求解和网格复核在内存中进行。结果 Action 保存动画及必要的复核标记。插件运行产生的工程内报告 Text 和磁盘报告、日志、缓存、快照、临时业务文件均为零。
 
-每次处理一个骨架、一个蒙皮网格和一个活动 Action。目标骨使用四元数旋转，骨架对象采用正的均匀缩放。蒙皮网格使用指向该骨架的线性骨架修改器并关闭「保留体积」。活动 NLA、目标骨约束、驱动或曲线修改器等输入需要先烘焙为可直接处理的动画。支持的最低版本为 Blender 4.4，实测环境为 Windows、Blender 5.2.2。
+每次处理一个骨架、一个蒙皮网格和一个活动 Action。目标骨使用四元数旋转，骨架对象采用正的均匀缩放。蒙皮网格使用指向该骨架的线性骨架修改器并关闭「保留体积」。活动 NLA、目标骨约束、驱动或曲线修改器等输入需要先烘焙为可直接处理的动画。支持的最低版本为 Blender 4.4，实测环境为 Windows、Blender 5.3.0。
 
 复核采用整数帧和半帧采样。姿态突变处仍可能需要手动调整，同一只手各手指之间的碰撞属于手工修整范围。
 
 ## 下载和许可证
 
-安装 ZIP 和源码 ZIP 均包含 `arm_clearance/` 下的 57 个 Python 文件。文件列表及校验值见 [release-manifest.json](release-manifest.json) 和 [SHA256SUMS.txt](SHA256SUMS.txt)。本版改动见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+安装 ZIP 和源码 ZIP 均包含 `arm_clearance/` 下的 61 个 Python 文件。文件列表及校验值见 [release-manifest.json](release-manifest.json) 和 [SHA256SUMS.txt](SHA256SUMS.txt)。本版改动见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
-作者 BlankWX。代码采用 GPL-3.0-or-later，完整条款见 [LICENSE](LICENSE)。
+由 BlankWX 维护，OpenAI Codex 参与开发。代码采用 GPL-3.0-or-later，完整条款见 [LICENSE](LICENSE)。

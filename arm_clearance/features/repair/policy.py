@@ -1,31 +1,62 @@
 """Area 6: failure history and declarative retry plans, without solver mutation."""
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import numpy as np
 from ...contracts import CollisionFields, RepairPlan
 from .fields import build_surface_repair_weights, merge_surface_repair_fields
 
 
+@dataclass(frozen=True)
+class SurfaceQuality:
+    frames: frozenset
+    category_samples: int
+    triangle_pairs: int
+
+    @classmethod
+    def measure(cls, surface):
+        frames = frozenset(surface['problem_frames'])
+        if len(frames) != surface['collision_samples']:
+            raise ValueError('Incomplete collision frame set')
+        categories = [detail for name, detail in surface['categories'].items()
+                      if name != 'same-side-finger-diagnostic']
+        return cls(frames, sum(len(detail['problem_frames']) for detail in categories),
+                   sum(detail['intersection_pair_count'] for detail in categories))
+
+    def improves(self, previous):
+        def score(quality):
+            return len(quality.frames), quality.category_samples, quality.triangle_pairs
+        return self.frames <= previous.frames and score(self) < score(previous)
+
+
 class RepairPolicy:
+    strategies = ('局部连续补修', '缩小窗口', '分部位补修')
+
     def __init__(self):
-        self.history_records = []
         self.time_partition = None
 
-    def record_failure(self, surface):
-        self.history_records.extend(surface.get('records', []))
-        return len(self.history_records)
+    def targets(self, surface, strategy):
+        if strategy != 2:
+            yield surface
+            return
+        for category, summary in surface['categories'].items():
+            if category == 'same-side-finger-diagnostic' or not summary['problem_frames']:
+                continue
+            frames = set(summary['problem_frames'])
+            records = [dict(frame=r['frame'], categories={category: r['categories'][category]})
+                       for r in surface['records'] if r['frame'] in frames]
+            yield dict(surface, records=records, categories={category: summary},
+                       problem_frames=sorted(frames))
 
-    def plan(self, surface, model, geometry, frames, attempt, world_scale, current):
-        repair_surface = dict(surface)
-        repair_surface['records'] = list(self.history_records)
+    def plan(self, surface, model, geometry, frames, attempt, world_scale, current, strategy):
+        radius = (24., 8., 8.)[strategy]
         fields, evidence = build_surface_repair_weights(
-            repair_surface, model, geometry, frames=frames, attempt=attempt, world_scale=world_scale,time_partition=self.time_partition)
+            surface, model, geometry, frames=frames, attempt=attempt, world_scale=world_scale,
+            half_window=radius, time_partition=self.time_partition)
         fields = merge_surface_repair_fields(current.as_mapping(), fields, world_scale=world_scale)
-        return RepairPlan(CollisionFields.from_mapping(fields), evidence,
+        plan = RepairPlan(CollisionFields.from_mapping(fields), evidence,
                           tuple(failed_hand_categories(surface)))
-
-    def scope(self, plan, surface, frames):
-        free, evidence = repair_free_frames(surface, frames, half_window=24.,time_partition=self.time_partition)
-        return replace(plan, free_frames=free, scope_evidence=evidence)
+        free, scope = repair_free_frames(surface, frames, half_window=radius,
+                                         time_partition=self.time_partition, strategy=strategy)
+        return replace(plan, free_frames=free, scope_evidence=scope)
 
 
 def failed_hand_categories(surface):
@@ -44,7 +75,7 @@ def failed_hand_categories(surface):
                 failed.add(name)
     return sorted(failed)
 
-def repair_free_frames(surface, frames, half_window=24.,time_partition=None):
+def repair_free_frames(surface, frames, half_window=24.,time_partition=None, strategy=0):
     """Request C2-control freedom around current failures, with a safe fallback."""
     frames = np.asarray(frames, dtype=float)
     failures = []
@@ -62,7 +93,12 @@ def repair_free_frames(surface, frames, half_window=24.,time_partition=None):
     if failures:
         if time_partition is not None and time_partition.cuts:
             free=np.zeros(len(frames),dtype=bool)
-            for frame in failures:free|=time_partition.repair_support(frames,frame,half_window)
+            for frame in failures:
+                support = time_partition.repair_support(frames, frame, half_window)
+                row = int(np.searchsorted(frames, frame))
+                if strategy and row in time_partition.cuts and frames[row - 1] < frame < frames[row]:
+                    support[row if strategy == 1 else row - 1] = False
+                free |= support
         else:
             free = np.min(np.abs(frames[:, None] - np.asarray(failures)[None]), axis=1) <= half_window
         if not np.any(free):

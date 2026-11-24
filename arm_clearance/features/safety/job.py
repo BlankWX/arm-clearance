@@ -20,6 +20,7 @@ def _retain_review_action(arm, source, candidate, report, validation_status):
 
 
 class JobGuard:
+    body_limit_mm = 20.
     def __init__(self, io):
         self.io=io
         self.started=time.perf_counter()
@@ -30,7 +31,7 @@ class JobGuard:
                   'source_action': source.name, 'previous_action': previous.name,
                   'targets': targets, 'wrist_location_targets': wrists,
                   'proxy': {}, 'surface_verification': None, 'attempts': [],
-                  'scope': ('整段六骨旋转与双腕位置修正，手指动画保持原样；'
+                  'scope': ('整段六骨旋转修正，手指动画保持原样；'
                             '代理残差与真实变形网格验证分别报告；'
                             '烘焙数据独立保留，未通过复核的动作明确标记为待修正；'
                             '离散时刻验证不构成全部连续时刻无穿模的数学证明')}
@@ -87,33 +88,26 @@ class JobGuard:
             arm['ac_result_action'] = candidate.name
             if 'ac_review_action' in arm:
                 del arm['ac_review_action']
+            if 'arm_clearance_problem_frames' in candidate:
+                del candidate['arm_clearance_problem_frames']
             candidate['arm_clearance_validation_status'] = 'passed'
             report['status'] = 'complete'
             settings.status = '完成 %d–%d 帧，复核通过，烘焙动作已保留；保存工程即可保存数据' % (start, end)
         else:
             _retain_review_action(arm, source, candidate, report, 'needs_review')
             report['status'] = 'needs_review'
-            reason = ('身体代理仍有深残差' if report['validation_failure'] == 'deep_body_proxy_residual'
-                      else '仍有穿模，请播放检查并二次修正')
+            reason = ('自动补修后身体代理仍有深残差' if report['validation_failure'] == 'deep_body_proxy_residual'
+                      else '补修已停滞，已保留最佳动作，剩余问题帧见动作标记')
             settings.status = '已保留 %d–%d 帧烘焙，复核未通过：%s；可保存和切换查看' % (start, end, reason)
         self.complete = True
         return candidate
 
-    def verification_terminal(self, surface, corrected, scale, attempt_report):
+    def check_candidate(self, surface, corrected, scale, attempt_report):
         if surface is None or not surface['complete']:
             raise RuntimeError('真实网格复核未完成')
         body_depth_world_mm = float(corrected['body_max_mm']) * scale
         attempt_report['body_proxy_max_world_mm'] = body_depth_world_mm
-        if body_depth_world_mm > 20.:
-            self.report['validation_failure'] = 'deep_body_proxy_residual'
-            return True
-        return not surface['collision_samples']
-
-    def retries_exhausted(self, attempt):
-        if attempt == 3:
-            self.report['validation_failure'] = 'actual_surface_intersection'
-            return True
-        return False
+        return body_depth_world_mm <= self.body_limit_mm
 
     def cancel(self):
         self.report['status']='cancelled'

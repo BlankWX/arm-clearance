@@ -5,40 +5,13 @@ import numpy as np
 from ..features.collision.parts import (CATEGORIES, OWN_CATEGORY, build_surface_parts,
     sample_frames, _components, _inside_closed)
 
-def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
-                  step=.5, shoulder_fraction=.34, max_pairs=64,
-                  check_containment=True, containment_probe=None,
-                  include_self_hand=False, frames=None,
-                  own_hand_arm=True, own_forearm_cutoff=.78):
-    """Yield cumulative JSON-compatible full-skin diagnostics each sample.
-
-    ``step`` supports integer (1), half (.5), or quarter (.25) frames.
-    ``frames`` may override the inclusive range with explicit sample times.
-    Stored face IDs are original ``geo['triangles']`` indices, not compact BVH
-    indices or mesh polygon indices.  Counts are exact; stored face pairs are
-    capped by ``max_pairs`` per category per sample (``None`` means uncapped).
-    ``own_hand_arm`` defaults to True, adding ``hand-own-arm`` without changing
-    the original five category names. It tests all hand faces against the
-    whole upper arm and forearm proximal to the .78 rest-length cutoff.
-
-    ``containment_probe(frame, coords_world, prepared_parts)`` may return
-    dictionaries with ``category`` and optional diagnostic fields for closed
-    solver proxies.  Such findings fail the check, but remain marked as proxy
-    evidence instead of being called actual surface intersections.
-    """
-    import bpy
-    from mathutils.bvhtree import BVHTree
-
+def prepare_surface(geo, meta, body, shoulder_fraction=.34, own_forearm_cutoff=.78,
+                    own_hand_arm=True, include_self_hand=False, status=None):
     if status:
         status('真实网格复核：按骨骼权重拆分身体、双臂与手部')
     prepared = build_surface_parts(geo, meta, body, shoulder_fraction, own_forearm_cutoff)
     triangles, parts = prepared['triangles'], prepared['parts']
     n_vertices = len(geo['vertices'])
-    samples = sample_frames(start, end, step) if frames is None else np.asarray(frames, dtype=float)
-    if not len(samples) or not np.isfinite(samples).all():
-        raise ValueError('Surface verification needs finite sample times')
-    if max_pairs is not None and max_pairs < 0:
-        raise ValueError('max_pairs must be nonnegative or None')
     pairs = [('arm-body', 'arm_body.L', 'body'), ('arm-body', 'arm_body.R', 'body'),
              ('hand-body', 'hand.L', 'body'), ('hand-body', 'hand.R', 'body'),
              ('arm-arm', 'arm.L', 'arm.R'),
@@ -88,6 +61,42 @@ def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
                           for name, group in closed_components.items() for component in group}
     main_categories = CATEGORIES + ((OWN_CATEGORY,) if own_hand_arm else ())
     category_names = main_categories + (('same-side-finger-diagnostic',) if include_self_hand else ())
+    return (prepared, triangles, parts, n_vertices, pairs, components, closed_components, component_polygons, part_vertices, part_polygons, main_categories, category_names)
+
+
+def surface_check(scene, arm, mesh, geo, meta, body, start, end, status=None,
+                  step=.5, shoulder_fraction=.34, max_pairs=64,
+                  check_containment=True, containment_probe=None,
+                  include_self_hand=False, frames=None,
+                  own_hand_arm=True, own_forearm_cutoff=.78, topology=None):
+    """Yield cumulative JSON-compatible full-skin diagnostics each sample.
+
+    ``step`` supports integer (1), half (.5), or quarter (.25) frames.
+    ``frames`` may override the inclusive range with explicit sample times.
+    Stored face IDs are original ``geo['triangles']`` indices, not compact BVH
+    indices or mesh polygon indices.  Counts are exact; stored face pairs are
+    capped by ``max_pairs`` per category per sample (``None`` means uncapped).
+    ``own_hand_arm`` defaults to True, adding ``hand-own-arm`` without changing
+    the original five category names. It tests all hand faces against the
+    whole upper arm and forearm proximal to the .78 rest-length cutoff.
+
+    ``containment_probe(frame, coords_world, prepared_parts)`` may return
+    dictionaries with ``category`` and optional diagnostic fields for closed
+    solver proxies.  Such findings fail the check, but remain marked as proxy
+    evidence instead of being called actual surface intersections.
+    """
+    import bpy
+    from mathutils.bvhtree import BVHTree
+
+    samples = sample_frames(start, end, step) if frames is None else np.asarray(frames, dtype=float)
+    if not len(samples) or not np.isfinite(samples).all():
+        raise ValueError('Surface verification needs finite sample times')
+    if max_pairs is not None and max_pairs < 0:
+        raise ValueError('max_pairs must be nonnegative or None')
+    if topology is None:
+        topology = prepare_surface(geo, meta, body, shoulder_fraction, own_forearm_cutoff,
+                                   own_hand_arm, include_self_hand, status)
+    (prepared, triangles, parts, n_vertices, pairs, components, closed_components, component_polygons, part_vertices, part_polygons, main_categories, category_names) = topology
     result = {
         'samples': 0, 'total_samples': int(len(samples)), 'step': float(step),
         'body_intersection_samples': 0, 'mutual_intersection_samples': 0,
